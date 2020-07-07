@@ -109,6 +109,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+environment/
+venv.sh
 
 # Spyder project settings
 .spyderproject
@@ -127,3 +129,13 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Editors
+.vscode/
+
+# Vertibird
+*.db
+*.sqlite
+*.sqlite3
+*.toml
+*.config
