@@ -1,0 +1,17 @@
+{% extends "bootstrap.html" %}
+{% block content %}
+    {{ super() }}
+
+    <img style="position: fixed; top: 0; left: 0;" id="display" width="100%" height="100%" src="{{ url_for('display', vuuid = vuuid) }}"></img>
+    
+    <script type="text/javascript">
+        document.getElementById('display').onload = function() {
+            window.location.reload();
+        }
+        
+        document.getElementById('display').onerror = function() {
+            setTimeout(function() { window.location.reload(); }, 1000);
+        }
+    </script>
+
+{% endblock %}

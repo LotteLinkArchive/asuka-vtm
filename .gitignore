@@ -139,3 +139,6 @@ dmypy.json
 *.sqlite3
 *.toml
 *.config
+*.yun
+*.lock
+drives/

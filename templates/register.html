@@ -1,0 +1,15 @@
+{% extends "login.html" %}
+{% block action %}{{ url_for('register') }}{% endblock %}
+{% block title %}Sign up{% endblock %}
+{% block desc %}
+    Sign up for an account in order to manage virtual machines. <a href="{{ url_for('login') }}">Click here</a> to log in instead.
+{% endblock %}
+{% block userform %}
+    {{ super() }}
+    
+    <div class="form-label-group">
+        <input type="password" name="confirmpassword" id="inputConfirmPassword" class="form-control" placeholder="Confirm Password" required>
+        <label for="inputConfirmPassword">Confirm Password</label>
+    </div>
+{% endblock %}
+{% block submit %}Sign up{% endblock %}

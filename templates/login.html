@@ -1,0 +1,57 @@
+{% extends "bootstrap.html" %}
+{% block head %}
+    {{ super() }}
+
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='signin.css') }}">
+{% endblock %}
+{% block content %}
+    {{ super() }}
+<form class="form-signin" action="{% block action %}{{ url_for('login') }}{% endblock %}" method="POST" enctype="multipart/form-data">
+    <div class="text-center mb-4">
+        <a href="{{ url_for('index') }}">
+            <img class="mb-4" src="{{ url_for('static', filename=config['file']['site']['logo']) }}" alt="" width="72" height="72">
+        </a>
+        <h1 class="h3 mb-3 font-weight-normal">{% block title %}Sign in{% endblock %}</h1>
+        <p>
+            {% block desc %}
+                Sign into your account in order to manage virtual machines. <a href="{{ url_for('register') }}">Click here</a> to register instead.
+            {% endblock %}
+        </p>
+    </div>
+
+    {% if error %}
+    <div class="alert alert-danger" role="alert">
+      <b>Error: </b>{{ error }}
+    </div>
+    {% endif %}
+
+    {% block userform %}
+        <div class="form-label-group">
+            <input type="text" name="username" id="inputUsername" class="form-control" placeholder="Username" required autofocus>
+            <label for="inputUsername">Username</label>
+        </div>
+
+        <div class="form-label-group">
+            <input type="password" name="password" id="inputPassword" class="form-control" placeholder="Password" required>
+            <label for="inputPassword">Password</label>
+        </div>
+    {% endblock %}
+
+    {% block captcha %}
+        <center>
+            <img src="{{ captcha[1] }}" alt="C A P T C H A" style="margin-bottom: 16px;" class="img-thumbnail">
+        </center>
+        
+        <input type="hidden" name="captchaid" value="{{ captcha[0] }}"></input>
+        
+        <div class="form-label-group">
+            <input type="text" id="inputCaptcha" name="captcha" class="form-control" placeholder="Captcha" required>
+            <label for="inputCaptcha">Captcha</label>
+        </div>
+    {% endblock %}
+
+    <button class="btn btn-lg btn-primary btn-block" type="submit">{% block submit %}Sign in{% endblock %}</button>
+    
+    <p class="mt-5 mb-3 text-muted text-center">By creating an account or signing into an account, you are giving this website permission to identify you via a personalized session.</p>
+</form>
+{% endblock %}

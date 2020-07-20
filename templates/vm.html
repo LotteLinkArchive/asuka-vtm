@@ -1,0 +1,51 @@
+{% set state = vmif().get(vuuid).state() %}
+{% extends "dashboard.html" %}
+{% block dashmain %}
+    <div class="modal fade" id="delVMModal" tabindex="-1" role="dialog" aria-labelledby="delVMModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="delVMModalLabel">Delete virtual machine</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    Are you sure you want to delete this virtual machine?
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+                    <button type="submit" class="btn btn-danger" onclick="window.location.href='{{ url_for('vmd', vuuid = vuuid) }}';">Delete</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+        <h2>{{ vmname }} <small class="text-muted">{{ vuuid }}</small></h2>
+        <div class="btn-toolbar mb-2 mb-md-0">
+            <div class="btn-group btn-group-toggle" style="margin-right: 8px;" data-toggle="buttons">
+                <label class="btn btn-outline-success btn-sm active">
+                    <input type="radio" name="options" id="option1" onclick="window.location.href='{{ url_for('vms', action = 'start', vuuid = vuuid) }}';" autocomplete="off"{{ ' checked' if state == 'online' else '' }}> Start
+                </label>
+                <label class="btn btn-outline-warning btn-sm">
+                    <input type="radio" name="options" id="option2" onclick="window.location.href='{{ url_for('vms', action = 'shutdown', vuuid = vuuid) }}';" autocomplete="off"> Shutdown
+                </label>
+                <label class="btn btn-outline-warning btn-sm">
+                    <input type="radio" name="options" id="option3" onclick="window.location.href='{{ url_for('vms', action = 'reset', vuuid = vuuid) }}';" autocomplete="off"> Reset
+                </label>
+                <label class="btn btn-outline-danger btn-sm">
+                    <input type="radio" name="options" id="option4" onclick="window.location.href='{{ url_for('vms', action = 'stop', vuuid = vuuid) }}';" autocomplete="off"{{ ' checked' if state == 'offline' else '' }}> Stop
+                </label>
+            </div> 
+            
+            <button type="button" class="btn btn-sm btn-outline-danger" data-toggle="modal" data-target="#delVMModal">Delete</button>
+        </div>
+    </div>
+    
+    {% if error %}
+    <div class="alert alert-danger" role="alert">
+      <b>Error: </b>{{ error }}
+    </div>
+    {% endif %}
+{% endblock %}
