@@ -466,8 +466,7 @@ async def interact(vuuid):
     )
 
 @app.route('/display/<vuuid>')
-@app.route('/display/<vuuid>/<palette>')
-async def display(vuuid, palette = 'default'):
+async def display(vuuid):
     if (not get_login()) or (vuuid not in get_vms().keys()):
         abort(401)
     
@@ -477,16 +476,13 @@ async def display(vuuid, palette = 'default'):
         start_shape = copy.deepcopy(display.shape)
             
         process = subprocess.Popen(
-            shlex.split(('ffmpeg -f rawvideo -video_size {0}x{1} -vsync 0 '+
-                '-pixel_format rgb24 -i - -i ./static/palette-{2}.png -map 0 '+
-                '-vsync 0 -f gif -hide_banner -loglevel warning -nostats '+
-                '-lavfi "scale={3}:-1:flags=fast_bilinear,'+
-                'paletteuse=dither=bayer:diff_mode=rectangle" '+
-                '-loop -1 -blocksize 4096 -flush_packets 1 -y -').format(
+            shlex.split(('ffmpeg -f rawvideo -video_size {0}x{1} '+
+                '-pixel_format rgb24 -i - -map 0 '+
+                '-framerate {2} -f matroska -hide_banner -loglevel warning -nostats '+
+                '-b:v 128k -pix_fmt yuv420p -vcodec h264 -blocksize 4096 -flush_packets 1 -y -').format(
                     shlex.quote(str(display.shape[0])),
                     shlex.quote(str(display.shape[1])),
-                    shlex.quote(re.sub('[^0-9a-zA-Z]+', '_', palette.lower())),
-                    shlex.quote(str(display.shape[0] // 1.25))
+                    shlex.quote(str(vertibird.VNC_FRAMERATE))
                 )),
             stdin  = subprocess.PIPE,
             stdout = subprocess.PIPE
@@ -555,7 +551,7 @@ async def display(vuuid, palette = 'default'):
     
     response = await make_response(async_generator())
     response.timeout = None
-    response.mimetype = 'image/gif'
+    response.mimetype = 'video/webm'
     return response
 
 def main():
