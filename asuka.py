@@ -495,19 +495,13 @@ async def display(vuuid, palette = 'default'):
         read_queue = queue.Queue(maxsize = 1024)
         
         def writing_queue(disp, proc):
-            last = None
             while proc.returncode is None:
-                current = disp.capture().tobytes()
-                
-                if last != current:
-                    try:
-                        proc.stdin.write(current)
-                    except:
-                        break
-                    
-                    last = current
-                else:
-                    time.sleep(1 / vertibird.VNC_FRAMERATE)
+                time.sleep(1 / vertibird.VNC_FRAMERATE)
+
+                try:
+                    proc.stdin.write(disp.capture().tobytes())
+                except:
+                    break
         
             if proc.returncode is None:
                 proc.kill()

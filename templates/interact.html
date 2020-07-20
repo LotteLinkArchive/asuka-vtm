@@ -2,7 +2,7 @@
 {% block content %}
     {{ super() }}
 
-    <img style="position: fixed; top: 0; left: 0;" id="display" width="100%" height="100%" src="{{ url_for('display', vuuid = vuuid) }}"></img>
+    <img style="position: fixed; top: 0; left: 0;" id="display" width="100%" height="100%" src="{{ url_for('display', vuuid = vuuid, palette = 'default') }}"></img>
     
     <script type="text/javascript">
         document.getElementById('display').onload = function() {
