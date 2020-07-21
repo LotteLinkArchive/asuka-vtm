@@ -9,7 +9,8 @@ __version__ = '0.0.1'
 __license__ = 'AGPL-v3.0' # SEE LICENSE FILE
 
 import vertibird, argparse, toml, sys, os, random, string, base64, time, bcrypt
-import pickle, shlex, io, subprocess, asyncio, copy, threading, re, queue
+import pickle, shlex, io, subprocess, asyncio, copy, threading, re, queue, zlib
+import hashlib, struct
 import select as fselect
 
 vertibird.VNC_FRAMERATE = 24
@@ -17,7 +18,8 @@ vertibird.VNC_FRAMERATE = 24
 from captcha.audio import AudioCaptcha
 from captcha.image import ImageCaptcha
 
-from PIL import Image
+from PIL import Image, ImageOps, ImageMath
+import numpy as np
 
 from quart import (
     Quart, websocket, render_template, url_for, session, request,
@@ -465,94 +467,167 @@ async def interact(vuuid):
         vuuid = vuuid
     )
 
-@app.route('/display/<vuuid>')
-async def display(vuuid):
-    if (not get_login()) or (vuuid not in get_vms().keys()):
-        abort(401)
+@app.websocket('/operate/<username>/<password>/<vuuid>')
+async def operate(username, password, vuuid):
+    # USERNAME: 32-bit hex salt
+    # PASSWORD: SHA-512 hex hash (UTF-8 -> hex of token + space + hex of salt)
+    # These names were originally intended for websocket authorization, but it
+    # appears to be broken in Quart :(
     
-    async def async_generator():
-        vmint = vb().get(vuuid)
-        display = vmint.display
-        start_shape = copy.deepcopy(display.shape)
+    # Used for initial handshake
+    with db_session:
+        user = None
+        
+        # TODO: Improve database performance by NOT iterating over the whole
+        # user table.
+        for acc in select(p for p in User):
+            if hashlib.sha512('{0} {1}'.format(
+                bytes(acc.token).hex(),
+                username
+            ).encode()).hexdigest() == (
+                password
+            ):
+                
+                user = acc
+                
+                # This helps a bit, but not if they're the last user in the
+                # table...
+                break
+                    
+        # Abort if user is invalid or token is invalid
+        if user == None:
+            abort(403)
             
-        process = subprocess.Popen(
-            shlex.split(('ffmpeg -f rawvideo -video_size {0}x{1} '+
-                '-pixel_format rgb24 -i - -map 0 '+
-                '-framerate {2} -f matroska -hide_banner -loglevel warning -nostats '+
-                '-b:v 128k -pix_fmt yuv420p -vcodec h264 -blocksize 4096 -flush_packets 1 -y -').format(
-                    shlex.quote(str(display.shape[0])),
-                    shlex.quote(str(display.shape[1])),
-                    shlex.quote(str(vertibird.VNC_FRAMERATE))
-                )),
-            stdin  = subprocess.PIPE,
-            stdout = subprocess.PIPE
-        )
+        username = user.name
+            
+        vmo = VirtualMachine.get(owner = user.name, id = vuuid)
         
-        read_queue = queue.Queue(maxsize = 1024)
+        # Abort if VM doesn't exist or user is not the owner
+        if vmo == None:
+            abort(403)
+            
+        # Convert DB VM Object to Vertibird Object
+        vmi = vb().get(vmo.id)
         
-        def writing_queue(disp, proc):
-            while proc.returncode is None:
-                time.sleep(1 / vertibird.VNC_FRAMERATE)
+    # Define command functions
+    async def get_display(world):
+        display = world['context']['vm'].display
+        
+        WORKING_IMAGE_MODE = 'RGBA'
+        
+        newdisplay = lambda: Image.new(WORKING_IMAGE_MODE, display.shape)
+        
+        if 'framebuffer' not in world['context']:
+            world['context']['framebuffer'] = newdisplay()
+        elif display.shape != world['context']['framebuffer'].size:
+            world['context']['framebuffer'] = newdisplay()
+        
+        temp = display.capture().convert(WORKING_IMAGE_MODE)
+        
+        if world['context']['framebuffer'] != temp:
+            xsplit = world['context']['framebuffer'].split()
+            ysplit = temp.split()
+            expression = 'abs(b - a) * 255'
+            mask = ImageMath.eval('a * 255', a = Image.merge('RGB', (
+                ImageMath.eval(
+                    expression,
+                    a = xsplit[0], b = ysplit[0]).convert('L'),
+                ImageMath.eval(
+                    expression,
+                    a = xsplit[1], b = ysplit[1]).convert('L'),
+                ImageMath.eval(
+                    expression,
+                    a = xsplit[2], b = ysplit[2]).convert('L')
+            )).convert('L')).convert('L')
 
-                try:
-                    proc.stdin.write(disp.capture().tobytes())
-                except:
-                    break
-        
-            if proc.returncode is None:
-                proc.kill()
-        
-        def reading_queue(q, proc, vmcls):
-            while proc.returncode is None:
-                if vmcls.state() != 'online':
-                    break
-                elif q.full():
-                    break
+            final = Image.composite(
+                Image.new('RGBA', temp.size), temp, ImageOps.invert(mask))
                 
-                try:
-                    q.put(os.read(proc.stdout.fileno(), 4096))
-                except:
-                    break
-                
-            if proc.returncode is None:
-                proc.kill()
-        
-        threading.Thread(
-            target = writing_queue,
-            args = (display, process),
-            daemon = True
-        ).start()
-        
-        threading.Thread(
-            target = reading_queue,
-            args = (read_queue, process, vmint),
-            daemon = True
-        ).start()
-        
-        last = None
-        while (process.returncode is None
-            and vmint.state() == 'online'
-            and display.shape == start_shape
-        ):
-            await asyncio.sleep(1 / vertibird.VNC_FRAMERATE)
-                    
-            while process.returncode is None:
-                try:
-                    get = read_queue.get_nowait()
-                except queue.Empty:
-                    break
-                    
-                yield get
-                
-        if process.returncode is None:
-            process.stdin.close()
-            process.stdout.close()
-            process.kill()
+            world['context']['framebuffer'] = temp
+            
+            mask = io.BytesIO()
+            final.split()[3].convert('1').save(mask, 'PNG')
+            mask.seek(0)
+            
+            data = io.BytesIO()
+            final.convert('RGB').save(
+                data, 'JPEG', quality = 0, optimize = True)
+            data.seek(0)
+            
+            return struct.pack('<?', True) + zlib.compress(
+                b''.join([
+                    struct.pack('<I', mask.getbuffer().nbytes),
+                    mask.read(),
+                    struct.pack('<I', data.getbuffer().nbytes),
+                    data.read(),
+                ]),
+                level = 1
+            )
+        else:
+            return struct.pack('<?', False)
+            
+    async def clear_framebuffer(world):
+        if 'framebuffer' in world['context']:
+            del world['context']['framebuffer']
+            
+            return struct.pack('<?', True)
+        else:
+            return struct.pack('<?', False)
     
-    response = await make_response(async_generator())
-    response.timeout = None
-    response.mimetype = 'video/webm'
-    return response
+    # Create command lookup table
+    commands = {
+        0: get_display,
+        1: clear_framebuffer
+    }
+    
+    # Command execution module
+    context = {
+        'vm': vmi,
+        'username': username
+    }
+    while True:
+        try:
+            # Get command from user
+            command = await websocket.receive()
+
+            # If command isn't valid (e.g they're sending strings), encode it.
+            if type(command) != bytes:
+                command = command.encode()
+               
+            # Decode command
+            header_pattern = '<BI'
+            header_size = struct.calcsize(header_pattern)
+            opcode, event, data = (
+                *struct.unpack(
+                    header_pattern,
+                    command[:header_size]
+                ),  command[header_size:]
+            )
+            
+            # Execute command from lookup table
+            await websocket.send(
+                command[:header_size] + bytes(await commands[opcode]({
+                    'context': context,
+                    'data'   : data   ,
+                    'event'  : event
+                }))
+            )
+        except Exception as e:
+            exception_header = lambda code: (
+                command[:header_size] +
+                struct.pack('<H', code)
+            )
+            
+            if type(e) == KeyError and opcode not in commands:
+                await websocket.send(
+                    exception_header(404) + 
+                    'Opcode {0} not found'.format(opcode).encode()
+                )
+            else:
+                await websocket.send(
+                    exception_header(500) + 
+                    str(e).encode()
+                )
 
 def main():
     parser = argparse.ArgumentParser(
