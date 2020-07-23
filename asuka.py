@@ -10,15 +10,20 @@ __license__ = 'AGPL-v3.0' # SEE LICENSE FILE
 
 import vertibird, argparse, toml, sys, os, random, string, base64, time, bcrypt
 import pickle, shlex, io, subprocess, asyncio, copy, threading, re, queue, zlib
-import hashlib, struct
+import hashlib, struct, math, itertools, xxhash, collections, traceback
 import select as fselect
 
-vertibird.VNC_FRAMERATE = 24
+# Video options
+vertibird.VNC_FRAMERATE = 32
+WORKING_IMAGE_MODE = 'RGBA'
+CHUNK_SIZE = 128
+LOSSY_COLORS_AUTO = CHUNK_SIZE // 2
+LOSSY_COLORS = LOSSY_COLORS_AUTO if LOSSY_COLORS_AUTO <= 256 else 256
 
 from captcha.audio import AudioCaptcha
 from captcha.image import ImageCaptcha
 
-from PIL import Image, ImageOps, ImageMath
+from PIL import Image, ImageOps, ImageMath, ImageDraw
 import numpy as np
 
 from quart import (
@@ -232,6 +237,8 @@ app.jinja_env.globals.update(get_login=get_login)
 app.jinja_env.globals.update(get_groups=get_groups)
 app.jinja_env.globals.update(get_vms=get_vms)
 app.jinja_env.globals.update(vmif=vb)
+app.jinja_env.globals.update(os=os)
+app.jinja_env.globals.update(hashlib=hashlib)
 
 @app.route('/')
 async def index():
@@ -513,58 +520,114 @@ async def operate(username, password, vuuid):
     async def get_display(world):
         display = world['context']['vm'].display
         
-        WORKING_IMAGE_MODE = 'RGBA'
+        # Capture the display on each call
+        temp = display.capture().convert(WORKING_IMAGE_MODE)
         
-        newdisplay = lambda: Image.new(WORKING_IMAGE_MODE, display.shape)
+        # Limit the size of the display just in case
+        if math.prod(temp.size) > 2073600:
+            temp = Image.new(WORKING_IMAGE_MODE, (640, 480))
+            ImageDraw.Draw(temp).text(
+                (8, 8),
+                'Invalid signal! Consuming over 2073600 pixels!',
+                (255, 255, 0)
+            )
         
+        newdisplay = lambda: Image.new(WORKING_IMAGE_MODE, temp.size)
+        
+        # Create a new cache/framebuffer if it doesn't exist or the display
+        # size has changed.
+        # (Split into multiple checks to prevent a keyerror)
         if 'framebuffer' not in world['context']:
             world['context']['framebuffer'] = newdisplay()
         elif display.shape != world['context']['framebuffer'].size:
             world['context']['framebuffer'] = newdisplay()
         
-        temp = display.capture().convert(WORKING_IMAGE_MODE)
-        
         if world['context']['framebuffer'] != temp:
-            xsplit = world['context']['framebuffer'].split()
-            ysplit = temp.split()
-            expression = 'abs(b - a) * 255'
-            mask = ImageMath.eval('a * 255', a = Image.merge('RGB', (
-                ImageMath.eval(
-                    expression,
-                    a = xsplit[0], b = ysplit[0]).convert('L'),
-                ImageMath.eval(
-                    expression,
-                    a = xsplit[1], b = ysplit[1]).convert('L'),
-                ImageMath.eval(
-                    expression,
-                    a = xsplit[2], b = ysplit[2]).convert('L')
-            )).convert('L')).convert('L')
-
-            final = Image.composite(
-                Image.new('RGBA', temp.size), temp, ImageOps.invert(mask))
+            chunks = []
+            for x, y in itertools.product(
+                    range(math.ceil(temp.width / CHUNK_SIZE)),
+                    range(math.ceil(temp.height / CHUNK_SIZE))
+                ):
+                x = x * CHUNK_SIZE
+                y = y * CHUNK_SIZE
+                x_end = x + CHUNK_SIZE
+                y_end = y + CHUNK_SIZE
                 
+                temp_c = temp.crop((x, y, x_end, y_end))
+                fb_c = world['context']['framebuffer'].crop(
+                    (x, y, x_end, y_end))
+
+                if temp_c != fb_c:
+                    downscale = (lambda i: i.resize(
+                        size = (i.width // 4, i.height // 4),
+                        resample = Image.BICUBIC
+                    ))
+                    
+                    xsplit = downscale(fb_c).split()
+                    ysplit = downscale(temp_c).split()
+                    mask = ImageOps.invert(ImageMath.eval(
+                        '((abs(b - a) + abs(d - c) + abs(f - e)) * 127)',
+                        a = xsplit[0], b = ysplit[0],
+                        c = xsplit[1], d = ysplit[1],
+                        e = xsplit[2], f = ysplit[2]
+                    ).convert('L')).convert('1', dither = Image.NONE).resize(
+                        size = temp_c.size,
+                        resample = Image.NEAREST
+                    )
+
+                    final = Image.composite(
+                        Image.new('RGBA', temp_c.size), temp_c, mask)
+                    
+                    chash = xxhash.xxh32(
+                        final.resize(
+                            size = (final.width // 3, final.height // 3),
+                            resample = Image.NEAREST
+                        ).tobytes()
+                    ).intdigest()
+                    
+                    if chash not in world['context']['chunkcache']:
+                        data = io.BytesIO()
+                        if final.getcolors(maxcolors = LOSSY_COLORS) == None:
+                            final.save(data, 'WEBP', quality = 15, method = 0)
+                        else:
+                            final.save(
+                                data, 'WEBP', lossless = True, method = 0)
+                        data.seek(0)
+
+                        chunks.append(struct.pack(
+                            '<I?IHH',
+                            data.getbuffer().nbytes,
+                            False,
+                            chash,
+                            x,
+                            y
+                        ) + data.read())
+                            
+                        world['context']['chunkcache'].append(chash)
+                    else:
+                        chunks.append(struct.pack(
+                            '<I?IHH', 0, True, chash, x, y))
+                            
+            chunks = b''.join(chunks)
+            
             world['context']['framebuffer'] = temp
             
-            mask = io.BytesIO()
-            final.split()[3].convert('1').save(mask, 'PNG')
-            mask.seek(0)
-            
-            data = io.BytesIO()
-            final.convert('RGB').save(
-                data, 'JPEG', quality = 0, optimize = True)
-            data.seek(0)
-            
-            return struct.pack('<?', True) + zlib.compress(
-                b''.join([
-                    struct.pack('<I', mask.getbuffer().nbytes),
-                    mask.read(),
-                    struct.pack('<I', data.getbuffer().nbytes),
-                    data.read(),
-                ]),
-                level = 1
+            compressed = zlib.compress(chunks, level = 1)
+
+            return (
+                struct.pack(
+                    '<?HHI', # 9 bytes
+                    True,
+                    temp.size[0],
+                    temp.size[1],
+                    len(compressed)
+                ) +
+                compressed
             )
         else:
-            return struct.pack('<?', False)
+            # Inform the client that nothing has changed whatsoever. Stop
+            # bugging me!
+            return struct.pack('<?HHI', False, temp.size[0], temp.size[1], 0)
             
     async def clear_framebuffer(world):
         if 'framebuffer' in world['context']:
@@ -574,16 +637,124 @@ async def operate(username, password, vuuid):
         else:
             return struct.pack('<?', False)
     
+    async def get_display_size(world):
+        return struct.pack('<II', *world['context']['vm'].display.shape)
+    
+    async def move_mouse(world):
+        world['context']['vm'].display.mouseMove(
+            *struct.unpack('<II', world['data'])
+        )
+        
+        return struct.pack('<?', True)
+        
+    async def mouse_down(world):
+        world['context']['vm'].display.mouseDown(
+            *struct.unpack('<B', world['data'])
+        )
+        
+        return struct.pack('<?', True)
+        
+    async def mouse_up(world):
+        world['context']['vm'].display.mouseUp(
+            *struct.unpack('<B', world['data'])
+        )
+        
+        return struct.pack('<?', True)
+        
+    async def key_down(world):
+        key = key_decode(world, struct.unpack('<I', world['data'])[0])
+        world['context']['vm'].display.keyDown(key)
+        
+        if key == 'shift':
+            world['context']['shift'] = True
+            
+        if key == 'caplk':
+            world['context']['shift'] = not world['context']['shift']
+        
+        return struct.pack('<?', True)
+    
+    async def key_up(world):
+        key = key_decode(world, struct.unpack('<I', world['data'])[0])
+        world['context']['vm'].display.keyUp(key)
+        
+        if key == 'shift':
+            world['context']['shift'] = False
+        
+        return struct.pack('<?', True)
+    
+    def key_decode(world, key):
+        lookup = {
+            0x000D: 'return',
+            0x0008: 'bsp',
+            0x0009: 'tab',
+            0x001B: 'esc',
+            0x002D: 'ins',
+            0x002E: 'del',
+            0x0024: 'home',
+            0x0023: 'end',
+            0x0021: 'pgup',
+            0x0022: 'pgdown',
+            0x0026: 'up',
+            0x0028: 'down',
+            0x0025: 'left',
+            0x0027: 'right',
+            
+            0x00DC: 'bslash',
+            0x00BF: 'fslash',
+            0x0020: 'space',
+            0x0070: 'f1',
+            0x0071: 'f2',
+            0x0072: 'f3',
+            0x0073: 'f4',
+            0x0074: 'f5',
+            0x0075: 'f6',
+            0x0076: 'f7',
+            0x0077: 'f8',
+            0x0078: 'f9',
+            0x0079: 'f10',
+            0x007A: 'f11',
+            0x007B: 'f12',
+            
+            0x0010: 'shift',
+            0x0011: 'ctrl',
+            0x005B: 'super', # Unsure about this
+            0x0012: 'alt',
+            0x00E1: 'ralt',
+            0x0091: 'scrlk',
+            0x0013: 'pause',
+            0x0090: 'numlk',
+            # 0x0014: 'caplk', # Ignore caps lock, it's a shit key anyway
+            0x005D: 'meta' # And this
+        }
+        
+        if key in lookup:
+            key = lookup[key]
+        else:
+            key = chr(key).lower()
+            
+            if world['context']['shift'] == True:
+                key = key.upper()
+        
+        return key
+    
     # Create command lookup table
     commands = {
         0: get_display,
-        1: clear_framebuffer
+        1: clear_framebuffer,
+        2: move_mouse,
+        3: get_display_size,
+        4: mouse_down,
+        5: mouse_up,
+        6: key_down,
+        7: key_up
     }
     
     # Command execution module
     context = {
         'vm': vmi,
-        'username': username
+        'username': username,
+        'chunkcache': collections.deque(maxlen = 4096),
+        'shift': False
     }
     while True:
         try:
@@ -606,7 +777,9 @@ async def operate(username, password, vuuid):
             
             # Execute command from lookup table
             await websocket.send(
-                command[:header_size] + bytes(await commands[opcode]({
+                command[:header_size] +
+                struct.pack('<?', True) +
+                bytes(await commands[opcode]({
                     'context': context,
                     'data'   : data   ,
                     'event'  : event
@@ -615,7 +788,7 @@ async def operate(username, password, vuuid):
         except Exception as e:
             exception_header = lambda code: (
                 command[:header_size] +
-                struct.pack('<H', code)
+                struct.pack('<?H', False, code)
             )
             
             if type(e) == KeyError and opcode not in commands:
@@ -624,6 +797,8 @@ async def operate(username, password, vuuid):
                     'Opcode {0} not found'.format(opcode).encode()
                 )
             else:
+                traceback.print_exc()
+                
                 await websocket.send(
                     exception_header(500) + 
                     str(e).encode()

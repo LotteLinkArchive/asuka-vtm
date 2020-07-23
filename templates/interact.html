@@ -1,19 +1,284 @@
+{% set seed = os.urandom(8).hex() %}
 {% extends "bootstrap.html" %}
 {% block content %}
     {{ super() }}
-
-    <video style="position: fixed; top: 0; left: 0;" id="display" width="100%" height="100%" id="display" autoplay autobuffer="false" preload="none">
-        <source src="{{ url_for('display', vuuid = vuuid) }}" type="video/webm">
-        Your browser is shit.
-    </video> 
     
+    <canvas id="display" width="640" height="480" style="background-color: black; display: none;"></canvas>
+    <canvas id="display-visible" width="640" height="480" style="background-color: black;"></canvas>
+    
+    <script type="text/javascript" src="{{ url_for('static', filename='cache.js') }}"></script>
+    <script type="text/javascript" src="{{ url_for('static', filename='pako.min.js') }}"></script>
+    <script type="text/javascript" src="{{ url_for('static', filename='struct.js') }}"></script>
     <script type="text/javascript">
-        document.getElementById('display').onload = function() {
-            window.location.reload();
+        var vcanvas = document.getElementById('display-visible');
+        vcanvas.requestPointerLock = vcanvas.requestPointerLock ||
+                                     vcanvas.mozRequestPointerLock;
+
+        document.exitPointerLock = document.exitPointerLock ||
+                                   document.mozExitPointerLock;
+        
+        vcanvas.onclick = function() {
+            this.requestPointerLock();
+        };
+        
+        async function lockChangeAlert() {
+            if (document.pointerLockElement === vcanvas ||
+                document.mozPointerLockElement === vcanvas) {
+                    
+                document.addEventListener('mousemove', updateMousePosition, false);
+                document.addEventListener('mousedown', updateMouseStateDown, false);
+                document.addEventListener('mouseup', updateMouseStateUp, false);
+                document.addEventListener('keydown', updateKeyboardDown, false);
+                document.addEventListener('keyup', updateKeyboardUp, false);
+            } else {
+                document.removeEventListener('mousemove', updateMousePosition, false);
+                document.removeEventListener('mousedown', updateMouseStateDown, false);
+                document.removeEventListener('mouseup', updateMouseStateUp, false);
+                document.removeEventListener('keydown', updateKeyboardDown, false);
+                document.removeEventListener('keyup', updateKeyboardUp, false);
+            }
         }
         
-        document.getElementById('display').onerror = function() {
-            setTimeout(function() { window.location.reload(); }, 1000);
+        document.addEventListener('pointerlockchange', lockChangeAlert, false);
+        document.addEventListener('mozpointerlockchange', lockChangeAlert, false);
+        
+        function pwsurl(s) {
+            var l = window.location;
+            return ((l.protocol === "https:") ? "wss://" : "ws://") + l.host + l.pathname + s;
+        }
+        
+        var concatArrayBuffers = function(buffer1, buffer2) {
+            if (!buffer1) {
+                return buffer2;
+            } else if (!buffer2) {
+                return buffer1;
+            }
+
+            var tmp = new Uint8Array(buffer1.byteLength + buffer2.byteLength);
+            tmp.set(new Uint8Array(buffer1), 0);
+            tmp.set(new Uint8Array(buffer2), buffer1.byteLength);
+            return tmp.buffer;
+        };
+        
+        var INTERACT_URL = pwsurl('/../../operate/{{ "{0}/{1}/{2}".format(seed, hashlib.sha512("{0} {1}".format(session.logged_in.hex(), seed).encode()).hexdigest(), vuuid) }}');
+        var ws = new WebSocket(INTERACT_URL);
+        
+        // TEST FUNCTION, REMOVE THIS
+        // executeRemote(0, await new Response(new Blob([0, 0])).arrayBuffer(), function(data) { console.log(data); })
+        
+        function ab2str(buf) {
+            return String.fromCharCode.apply(null, new Uint8Array(buf));
+        }
+        
+        function str2ab(str) {
+            var buf = new ArrayBuffer(str.length);
+            var bufView = new Uint8Array(buf);
+            for (var i=0, strLen=str.length; i < strLen; i++) {
+                bufView[i] = str.charCodeAt(i);
+            }
+            return buf;
+        }
+        
+        function arrayBufferToBase64( buffer ) {
+            var binary = '';
+            var bytes = new Uint8Array( buffer );
+            var len = bytes.byteLength;
+            for (var i = 0; i < len; i++) {
+                binary += String.fromCharCode( bytes[ i ] );
+            }
+            return window.btoa( binary );
+        }
+        
+        function parseError(data) {
+            return [struct('<H').unpack(data.slice(0, 2)), ab2str(data.slice(2))];
+        }
+        
+        function defaultParseError(details) {
+            console.error(details[0] + " WEBSOCKET: " + details[1]);
+        }
+        
+        function executeRemote(opcode, data, callback, onerror) {
+            // Handle remote communication with the Asuka server (interacting with the VM in realtime)
+            
+            if (typeof(onerror) === 'undefined') {
+                var onerror = defaultParseError;
+            }
+            
+            var EventID = Math.floor(Math.random() * 4294967296);
+            var Message = concatArrayBuffers(struct('<BI').pack(opcode, EventID), data);
+            
+            ws.addEventListener('message', async function(event) {
+                var headerbuf = await new Response(event.data.slice(0, 5)).arrayBuffer();
+                var header = struct('<BI').unpack(headerbuf);
+                var error = await new Response(event.data.slice(5, 6)).arrayBuffer();
+                var data = await new Response(event.data.slice(6)).arrayBuffer();
+                var errorState = struct('<?').unpack(error)[0];
+                
+                if (header[1] == EventID && header[0] == opcode) {
+                    this.removeEventListener('message', arguments.callee, false);
+                    
+                    if (errorState == true) {
+                        callback(data);
+                    } else {
+                        onerror(parseError(data));
+                    }
+                }
+            }, false);
+            
+            ws.send(new Blob([Message]));
+        }
+        
+        function imagePromise(src) {
+            return new Promise((resolve, reject) => {
+                let img = new Image()
+                img.onload = () => resolve(img)
+                img.onerror = reject
+                img.src = src
+            })
+        }
+        
+        function executePromise(opcode, data) {
+            return new Promise((resolve, reject) => {
+                executeRemote(opcode, data, resolve, reject);
+            })
+        }
+        
+        var chunkcache = new Cache(8192); // Kept in sync with server, hopefully.
+        async function updateDisplay() {
+            var data = await executePromise(0, null);
+            
+            var header = struct('<?HHI').unpack(data.slice(0, 9));
+            
+            if (header[0] == true) {
+                var canvas = document.getElementById('display');
+                var canvas_context = canvas.getContext('2d');                    
+
+                if (canvas.width != header[1] || canvas.height != header[2]) {
+                    canvas.width = String(header[1]);
+                    canvas.height = String(header[2]);
+                    
+                    await resetMouse();
+                }
+                
+                var chunks = pako.inflate(data.slice(9, 9 + header[3])).buffer;
+                
+                var position = 0;
+                while (position < chunks.byteLength) {
+                    var chunkh = struct('<I?IHH').unpack(chunks.slice(position, position + 13));
+
+                    position += 13;
+
+                    if (chunkh[1] == false) {
+                        var chunkd = chunks.slice(position, position + chunkh[0]);
+                        
+                        var framebuffer = new Blob([chunkd]);
+                        var image = await imagePromise(URL.createObjectURL(framebuffer));
+                        canvas_context.drawImage(image, chunkh[3], chunkh[4]);
+                        
+                        chunkcache.setItem(chunkh[2], image);
+                        
+                        position += chunkh[0];
+                    } else {
+                        var image = chunkcache.getItem(chunkh[2]);
+                        
+                        if (image) {
+                            canvas_context.drawImage(image, chunkh[3], chunkh[4]);
+                        }
+                    }
+                }
+                
+                var canvas_vis = document.getElementById('display-visible');
+                var canvas_context_vis = canvas_vis.getContext('2d');    
+                
+                canvas_vis.width = canvas.width
+                canvas_vis.height = canvas.height
+                
+                canvas_context_vis.drawImage(canvas, 0, 0);
+            }
+            
+            return header[0];
+        }
+        
+        async function moveMouse(x, y) {
+            await executePromise(2, struct('<II').pack(x, y));
+        }
+        
+        async function displaySize() {
+            return struct('<II').unpack(await executePromise(3, null));
+        }
+        
+        async function resetMouse() {
+            await moveMouse(vcanvas.width, vcanvas.height);
+        }
+        
+        var xmpos = 0;
+        var ympos = 0;
+        var last_update = 0;
+        async function updateMousePosition(e) {
+            xmpos += e.movementX;
+            ympos += e.movementY;
+            
+            if (xmpos < 0) {
+                xmpos = 0;
+            }
+            
+            if (ympos < 0) {
+                ympos = 0;
+            }
+
+            
+            if (xmpos > (vcanvas.width * 2)) {
+                xmpos = (vcanvas.width * 2);
+            }
+            
+            if (ympos > (vcanvas.height * 2)) {
+                ympos = (vcanvas.height * 2);
+            }
+                    
+            var current_time = new Date().getTime();
+            if ((current_time - last_update) > 16) {
+                last_update = current_time;
+                
+                await moveMouse(xmpos, ympos);
+            }
+        }
+        
+        async function updateMouseStateDown(e) {
+            await executePromise(4, struct('<B').pack(e.button + 1));
+        }
+        
+        async function updateMouseStateUp(e) {
+            await executePromise(5, struct('<B').pack(e.button + 1));
+        }
+        
+        async function updateKeyboardDown(e) {
+            await executePromise(6, struct('<I').pack(e.keyCode));
+        }
+        
+        async function updateKeyboardUp(e) {
+            await executePromise(7, struct('<I').pack(e.keyCode));
+        }
+        
+        var changed = true;
+        async function updateLoop() {
+            if (!document.hidden) {
+                changed = await updateDisplay();
+            }
+            
+            var delay;
+            if (changed) {
+                delay = 16;
+            } else {
+                delay = 32;
+            }
+            
+            setTimeout(async function() {await updateLoop();}, delay);
+        }
+        
+        ws.onopen = async function(e) {
+            await resetMouse();
+            
+            await updateLoop();
         }
     </script>
 
