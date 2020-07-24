@@ -13,12 +13,20 @@ import pickle, shlex, io, subprocess, asyncio, copy, threading, re, queue, zlib
 import hashlib, struct, math, itertools, xxhash, collections, traceback
 import select as fselect
 
+from vncdotool import client as vncapiclient
+
 # Video options
 vertibird.VNC_FRAMERATE = 32
 WORKING_IMAGE_MODE = 'RGBA'
-CHUNK_SIZE = 128
+CHUNK_SIZE = 256
 LOSSY_COLORS_AUTO = CHUNK_SIZE // 2
 LOSSY_COLORS = LOSSY_COLORS_AUTO if LOSSY_COLORS_AUTO <= 256 else 256
+TYPE_PICK_MODE = 'mixed'
+ALPHA_CHECK = True
+
+# Utility expressions
+nonzero = lambda nsi: nsi if nsi > 0 else 1
+nonneg = lambda nsi: nsi if nsi >= 0 else 0
 
 from captcha.audio import AudioCaptcha
 from captcha.image import ImageCaptcha
@@ -31,7 +39,6 @@ from quart import (
     redirect, abort, Response, make_response
 )
 from pony.orm import *
-
 app = Quart(__name__)
 
 configfile_name = os.path.join(app.root_path, 'config.toml')
@@ -558,50 +565,127 @@ async def operate(username, password, vuuid):
                     (x, y, x_end, y_end))
 
                 if temp_c != fb_c:
-                    downscale = (lambda i: i.resize(
-                        size = (i.width // 4, i.height // 4),
-                        resample = Image.BICUBIC
-                    ))
-                    
-                    xsplit = downscale(fb_c).split()
-                    ysplit = downscale(temp_c).split()
-                    mask = ImageOps.invert(ImageMath.eval(
-                        '((abs(b - a) + abs(d - c) + abs(f - e)) * 127)',
-                        a = xsplit[0], b = ysplit[0],
-                        c = xsplit[1], d = ysplit[1],
-                        e = xsplit[2], f = ysplit[2]
-                    ).convert('L')).convert('1', dither = Image.NONE).resize(
-                        size = temp_c.size,
-                        resample = Image.NEAREST
-                    )
+                    if ALPHA_CHECK == True:
+                        downscale = (lambda i: i.resize(
+                            size = (i.width // 4, i.height // 4),
+                            resample = Image.BILINEAR
+                        ))
+                        
+                        xsplit = downscale(fb_c).split()
+                        ysplit = downscale(temp_c).split()
+                        
+                        #xsplit = fb_c.split()
+                        #ysplit = temp_c.split()
+                        mask = ImageOps.invert(ImageMath.eval(
+                            '((abs(b - a) + abs(d - c) + abs(f - e)) * 127)',
+                            a = xsplit[0], b = ysplit[0],
+                            c = xsplit[1], d = ysplit[1],
+                            e = xsplit[2], f = ysplit[2]
+                        ).convert('L')).convert(
+                            '1', dither = Image.NONE).resize(
+                                size = temp_c.size,
+                                resample = Image.NEAREST
+                        )
 
-                    final = Image.composite(
-                        Image.new('RGBA', temp_c.size), temp_c, mask)
+                        final = Image.composite(
+                            Image.new('RGBA', temp_c.size), temp_c, mask)
+                        
+                        bbox = final.getbbox()
+                        if bbox == None:
+                            continue
+                        elif bbox != (0, 0, CHUNK_SIZE, CHUNK_SIZE):
+                            final = final.crop(bbox)
+                            x += bbox[0]
+                            y += bbox[1]
+                        
+                        if final.width < 2 or final.height < 2:
+                            continue
+                    else:
+                        final = temp_c
                     
                     chash = xxhash.xxh32(
                         final.resize(
-                            size = (final.width // 3, final.height // 3),
+                            size = (
+                                nonzero(final.width // 2),
+                                nonzero(final.height // 2)
+                            ),
                             resample = Image.NEAREST
                         ).tobytes()
                     ).intdigest()
                     
                     if chash not in world['context']['chunkcache']:
-                        data = io.BytesIO()
-                        if final.getcolors(maxcolors = LOSSY_COLORS) == None:
-                            final.save(data, 'WEBP', quality = 15, method = 0)
-                        else:
+                        if TYPE_PICK_MODE == 'guess':
+                            data = io.BytesIO()
+                            if final.getcolors(
+                                maxcolors = LOSSY_COLORS) == None:
+                                final.save(data, 'WEBP', quality = 15)
+                            else:
+                                final.save(
+                                    data, 'WEBP', lossless = True)
+                            data.seek(0)
+                            
+                            data = data.read()
+                        elif TYPE_PICK_MODE == 'brute':
+                            results = []
+                            
+                            data = io.BytesIO()
+                            final.save(data, 'WEBP', quality = 15)
+                            data.seek(0)
+                            results.append(data.read())
+                            
+                            data = io.BytesIO()
+                            final.save(data, 'WEBP', lossless = True)
+                            data.seek(0)
+                            results.append(data.read())
+                            
+                            data = min(results, key=len)
+                        elif TYPE_PICK_MODE == 'mixed':
+                            alpha = True
+                            if not ImageOps.invert(final.split()[3]).getbbox():
+                                alpha = False
+                            
+                            data = io.BytesIO()
+                            if not alpha:
+                                final.convert('RGB').save(
+                                    data, 'JPEG', quality = 15)
+                            elif final.getcolors(
+                                maxcolors = LOSSY_COLORS) == None:
+                                    
+                                final.save(data, 'WEBP', quality = 15)
+                            else:
+                                final.save(data, 'WEBP', lossless = True)
+                            data.seek(0)
+                            
+                            data = data.read()
+                        elif TYPE_PICK_MODE == 'fastpng':
+                            data = io.BytesIO()
                             final.save(
-                                data, 'WEBP', lossless = True, method = 0)
-                        data.seek(0)
+                                data, 'PNG', compression_level = 0
+                            )
+                            data.seek(0)
+                            data = data.read()
+                        elif TYPE_PICK_MODE == 'jpegonly':
+                            data = io.BytesIO()
+                            final.convert('RGB').save(
+                                data, 'JPEG', quality = 25
+                            )
+                            data.seek(0)
+                            data = data.read()
+                        elif TYPE_PICK_MODE == 'webpd':
+                            data = io.BytesIO()
+                            final.save(data, 'WEBP', quality = 50,
+                                allow_mixed = True, save_all = True)
+                            data.seek(0)
+                            data = data.read()
 
                         chunks.append(struct.pack(
                             '<I?IHH',
-                            data.getbuffer().nbytes,
+                            len(data),
                             False,
                             chash,
                             x,
                             y
-                        ) + data.read())
+                        ) + data)
                             
                         world['context']['chunkcache'].append(chash)
                     else:
@@ -612,7 +696,7 @@ async def operate(username, password, vuuid):
             
             world['context']['framebuffer'] = temp
             
-            compressed = zlib.compress(chunks, level = 1)
+            # compressed = zlib.compress(chunks, level = 1)
 
             return (
                 struct.pack(
@@ -620,13 +704,12 @@ async def operate(username, password, vuuid):
                     True,
                     temp.size[0],
                     temp.size[1],
-                    len(compressed)
+                    len(chunks)
                 ) +
-                compressed
+                chunks
             )
         else:
-            # Inform the client that nothing has changed whatsoever. Stop
-            # bugging me!
+            # Inform the client that nothing has changed whatsoever.
             return struct.pack('<?HHI', False, temp.size[0], temp.size[1], 0)
             
     async def clear_framebuffer(world):
@@ -638,11 +721,11 @@ async def operate(username, password, vuuid):
             return struct.pack('<?', False)
     
     async def get_display_size(world):
-        return struct.pack('<II', *world['context']['vm'].display.shape)
+        return struct.pack('<HH', *world['context']['vm'].display.shape)
     
     async def move_mouse(world):
         world['context']['vm'].display.mouseMove(
-            *struct.unpack('<II', world['data'])
+            *struct.unpack('<HH', world['data'])
         )
         
         return struct.pack('<?', True)
@@ -662,147 +745,131 @@ async def operate(username, password, vuuid):
         return struct.pack('<?', True)
         
     async def key_down(world):
-        key = key_decode(world, struct.unpack('<I', world['data'])[0])
-        world['context']['vm'].display.keyDown(key)
-        
-        if key == 'shift':
-            world['context']['shift'] = True
-            
-        if key == 'caplk':
-            world['context']['shift'] = not world['context']['shift']
+        # Client format must be correct
+        world['context']['vm'].display.keyDown(world['data'].decode())
         
         return struct.pack('<?', True)
     
     async def key_up(world):
-        key = key_decode(world, struct.unpack('<I', world['data'])[0])
-        world['context']['vm'].display.keyUp(key)
-        
-        if key == 'shift':
-            world['context']['shift'] = False
+        world['context']['vm'].display.keyUp(world['data'].decode())
         
         return struct.pack('<?', True)
+
+    async def get_state(world):
+        state_enc = world['context']['vm'].state().encode()
+        
+        return struct.pack('<B', len(state_enc)) + state_enc
     
-    def key_decode(world, key):
-        lookup = {
-            0x000D: 'return',
-            0x0008: 'bsp',
-            0x0009: 'tab',
-            0x001B: 'esc',
-            0x002D: 'ins',
-            0x002E: 'del',
-            0x0024: 'home',
-            0x0023: 'end',
-            0x0021: 'pgup',
-            0x0022: 'pgdown',
-            0x0026: 'up',
-            0x0028: 'down',
-            0x0025: 'left',
-            0x0027: 'right',
-            
-            0x00DC: 'bslash',
-            0x00BF: 'fslash',
-            0x0020: 'space',
-            0x0070: 'f1',
-            0x0071: 'f2',
-            0x0072: 'f3',
-            0x0073: 'f4',
-            0x0074: 'f5',
-            0x0075: 'f6',
-            0x0076: 'f7',
-            0x0077: 'f8',
-            0x0078: 'f9',
-            0x0079: 'f10',
-            0x007A: 'f11',
-            0x007B: 'f12',
-            
-            0x0010: 'shift',
-            0x0011: 'ctrl',
-            0x005B: 'super', # Unsure about this
-            0x0012: 'alt',
-            0x00E1: 'ralt',
-            0x0091: 'scrlk',
-            0x0013: 'pause',
-            0x0090: 'numlk',
-            # 0x0014: 'caplk', # Ignore caps lock, it's a shit key anyway
-            0x005D: 'meta' # And this
-        }
+    async def cleanup_keys(world):
+        SPCHARS = list(vncapiclient.KEYMAP.keys())
+        for key in (SPCHARS + [chr(x) for x in range(256)]):
+            world['context']['vm'].display.keyUp(key)
+    
+        for button in range(32):
+            world['context']['vm'].display.mouseUp(button + 1)
+    
+        return struct.pack('<?', True)
+    
+    async def get_buffered_frames(world):
+        framewait, tobuffer = struct.unpack('<fB', world['data'])
         
-        if key in lookup:
-            key = lookup[key]
-        else:
-            key = chr(key).lower()
-            
-            if world['context']['shift'] == True:
-                key = key.upper()
+        if (tobuffer > vertibird.VNC_FRAMERATE or tobuffer < 1):
+            raise Exception('Invalid buffer size!')
+        elif (framewait > 0.3 or framewait < 0.004):
+            raise Exception('Invalid frame wait time!')
         
-        return key
+        frames = []
+        for cframe in range(tobuffer):
+            start_time = time.time()
+            frame = await get_display(world)
+            await asyncio.sleep(nonneg(framewait - (time.time() - start_time)))
+            total_time = time.time() - start_time
+            
+            frames.append(struct.pack(
+                '<fBBI', total_time, cframe, tobuffer, len(frame)) + frame)
+                # 10 bytes
+                
+        return b''.join(frames)
     
     # Create command lookup table
     commands = {
-        0: get_display,
-        1: clear_framebuffer,
-        2: move_mouse,
-        3: get_display_size,
-        4: mouse_down,
-        5: mouse_up,
-        6: key_down,
-        7: key_up
+        0 : get_display,
+        1 : clear_framebuffer,
+        2 : move_mouse,
+        3 : get_display_size,
+        4 : mouse_down,
+        5 : mouse_up,
+        6 : key_down,
+        7 : key_up,
+        8 : get_state,
+        9 : cleanup_keys,
+        10: get_buffered_frames
     }
     
     # Command execution module
     context = {
         'vm': vmi,
         'username': username,
-        'chunkcache': collections.deque(maxlen = 4096),
-        'shift': False
+        'chunkcache': collections.deque(maxlen = 4096)
     }
-    while True:
-        try:
-            # Get command from user
-            command = await websocket.receive()
+    try:
+        while True:
+            try:
+                # Get command from user
+                command = await websocket.receive()
 
-            # If command isn't valid (e.g they're sending strings), encode it.
-            if type(command) != bytes:
-                command = command.encode()
-               
-            # Decode command
-            header_pattern = '<BI'
-            header_size = struct.calcsize(header_pattern)
-            opcode, event, data = (
-                *struct.unpack(
-                    header_pattern,
-                    command[:header_size]
-                ),  command[header_size:]
-            )
-            
-            # Execute command from lookup table
-            await websocket.send(
-                command[:header_size] +
-                struct.pack('<?', True) +
-                bytes(await commands[opcode]({
-                    'context': context,
-                    'data'   : data   ,
-                    'event'  : event
-                }))
-            )
-        except Exception as e:
-            exception_header = lambda code: (
-                command[:header_size] +
-                struct.pack('<?H', False, code)
-            )
-            
-            if type(e) == KeyError and opcode not in commands:
-                await websocket.send(
-                    exception_header(404) + 
-                    'Opcode {0} not found'.format(opcode).encode()
+                # If command isn't valid (e.g they're sending strings)
+                if type(command) != bytes:
+                    command = command.encode()
+                   
+                # Decode command
+                header_pattern = '<BI'
+                header_size = struct.calcsize(header_pattern)
+                opcode, event, data = (
+                    *struct.unpack(
+                        header_pattern,
+                        command[:header_size]
+                    ),  command[header_size:]
                 )
-            else:
-                traceback.print_exc()
                 
+                # Execute command from lookup table
                 await websocket.send(
-                    exception_header(500) + 
-                    str(e).encode()
+                    command[:header_size] +
+                    struct.pack('<?', True) +
+                    bytes(await commands[opcode]({
+                        'context': context,
+                        'data'   : data   ,
+                        'event'  : event
+                    }))
                 )
+            except Exception as e:
+                exception_header = lambda code: (
+                    command[:header_size] +
+                    struct.pack('<?H', False, code)
+                )
+                
+                if type(e) == asyncio.CancelledError:
+                    raise
+                elif type(e) == KeyError and opcode not in commands:
+                    await websocket.send(
+                        exception_header(404) + 
+                        'Opcode {0} not found'.format(opcode).encode()
+                    )
+                else:
+                    traceback.print_exc()
+                    
+                    await websocket.send(
+                        exception_header(500) + 
+                        str(e).encode()
+                    )
+    except asyncio.CancelledError:
+        await commands[9]({
+            'context': context,
+            'data'   : b'',
+            'event'  : os.urandom(4)
+        })
+        
+        raise 
 
 def main():
     parser = argparse.ArgumentParser(

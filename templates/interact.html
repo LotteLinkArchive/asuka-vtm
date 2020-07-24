@@ -4,13 +4,150 @@
     {{ super() }}
     
     <canvas id="display" width="640" height="480" style="background-color: black; display: none;"></canvas>
-    <canvas id="display-visible" width="640" height="480" style="background-color: black;"></canvas>
+    <canvas id="display-visible" width="640" height="480" style="background-color: black; position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 64;"></canvas>
+    
+    <div id="foreground" style="position: fixed; top: 0; left: 0; z-index: 128; width: 100%; height: 100%;">
+        <div class="toast" id="inputtoast" role="alert" aria-live="assertive" aria-atomic="true" style="position: fixed; top: 0; right: 0; z-index: 9999; margin: 12px;" data-delay="5000">
+            <div class="toast-header">
+                <strong class="mr-auto"><span data-feather="alert-octagon"></span> Error</strong>
+                <button type="button" class="ml-2 mb-1 close" data-dismiss="toast" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+            <div class="toast-body">
+                The client attempted to send an invalid key to the server - it may not be possible to send the key due to limitations and poor documentation of the Remote Framebuffer Protocol. Try setting the guest operating system to the United States keyboard layout.
+            </div>
+        </div>
+    </div>
     
     <script type="text/javascript" src="{{ url_for('static', filename='cache.js') }}"></script>
     <script type="text/javascript" src="{{ url_for('static', filename='pako.min.js') }}"></script>
     <script type="text/javascript" src="{{ url_for('static', filename='struct.js') }}"></script>
     <script type="text/javascript">
-        var vcanvas = document.getElementById('display-visible');
+        const keys = {
+            27 : 'esc',
+            112: 'f1',
+            113: 'f2',
+            114: 'f3',
+            115: 'f4',
+            116: 'f5',
+            117: 'f6',
+            118: 'f7',
+            119: 'f8',
+            120: 'f9',
+            121: 'f10',
+            122: 'f11',
+            123: 'f12',
+            124: 'f13',
+            125: 'f14',
+            126: 'f15',
+            127: 'f16',
+            128: 'f17',
+            129: 'f18',
+            130: 'f19',
+            131: 'f20',
+            44 : 'sysrq',
+            145: 'scrlk',
+            19 : 'pause',
+            223: '`',
+            48 : '0',
+            49 : '1',
+            50 : '2',
+            51 : '3',
+            52 : '4',
+            53 : '5',
+            54 : '6',
+            55 : '7',
+            56 : '8',
+            57 : '9',
+            189: '-',
+            187: '=',
+            8  : 'bsp',
+            9  : 'tab',
+            81 : 'q',
+            87 : 'w',
+            69 : 'e',
+            82 : 'r',
+            84 : 't',
+            89 : 'y',
+            85 : 'u',
+            73 : 'i',
+            79 : 'o',
+            80 : 'p',
+            219: '[',
+            221: ']',
+            13 : 'return',
+            20 : 'caplk',
+            65 : 'a',
+            83 : 's',
+            68 : 'd',
+            70 : 'f',
+            71 : 'g',
+            72 : 'h',
+            74 : 'j',
+            75 : 'k',
+            76 : 'l',
+            186: ';',
+            192: '\'',
+            222: 'bslash',
+            16 : 'shift',
+            220: undefined,
+            90 : 'z',
+            88 : 'x',
+            67 : 'c',
+            86 : 'v',
+            66 : 'b',
+            78 : 'n',
+            77 : 'm',
+            188: ',',
+            190: '.',
+            191: 'fslash',
+            17 : 'ctrl',
+            91 : 'super',
+            18 : 'alt',
+            32 : 'space',
+            225: 'ralt',
+            92 : 'super',
+            93 : undefined,
+            45 : 'ins',
+            36 : 'home',
+            33 : 'pgup',
+            34 : 'pgdown',
+            46 : 'del',
+            35 : 'end',
+            38 : 'up',
+            40 : 'down',
+            37 : 'left',
+            39 : 'right'
+        }
+        
+        var shift_state = false;
+        var caps_state = false;
+        function decodeKey(code, down = false) {
+            var tb_dec = keys[code];
+            
+            if (tb_dec == undefined || tb_dec == null) {
+                $('#inputtoast').toast('show');
+                
+                return 'esc';
+            }
+            
+            if (tb_dec.includes('shift')) {
+                shift_state = !shift_state;
+            } else if (tb_dec.includes('caplk') && down) {
+                caps_state = !caps_state;
+            }
+            
+            var uppercase = caps_state || shift_state;
+            
+            if (tb_dec.length == 1 && uppercase) {
+                tb_dec = tb_dec.toUpperCase();
+            }
+            
+            return tb_dec;
+        }
+        
+        var vcanvas = document.getElementById('foreground');
         vcanvas.requestPointerLock = vcanvas.requestPointerLock ||
                                      vcanvas.mozRequestPointerLock;
 
@@ -36,6 +173,8 @@
                 document.removeEventListener('mouseup', updateMouseStateUp, false);
                 document.removeEventListener('keydown', updateKeyboardDown, false);
                 document.removeEventListener('keyup', updateKeyboardUp, false);
+                
+                await cleanupKeys();
             }
         }
         
@@ -108,11 +247,10 @@
             var Message = concatArrayBuffers(struct('<BI').pack(opcode, EventID), data);
             
             ws.addEventListener('message', async function(event) {
-                var headerbuf = await new Response(event.data.slice(0, 5)).arrayBuffer();
-                var header = struct('<BI').unpack(headerbuf);
-                var error = await new Response(event.data.slice(5, 6)).arrayBuffer();
-                var data = await new Response(event.data.slice(6)).arrayBuffer();
-                var errorState = struct('<?').unpack(error)[0];
+                var response = await new Response(event.data).arrayBuffer()
+                var header = struct('<BI').unpack(response.slice(0, 5));
+                var data = response.slice(6);
+                var errorState = struct('<?').unpack(response.slice(5, 6))[0];
                 
                 if (header[1] == EventID && header[0] == opcode) {
                     this.removeEventListener('message', arguments.callee, false);
@@ -137,6 +275,12 @@
             })
         }
         
+        function canvasBitmapPromise(canvas, mimetype, quality) {
+            return new Promise((resolve, reject) => {
+                canvas.toBlob(resolve, mimetype, quality);
+            })
+        }
+        
         function executePromise(opcode, data) {
             return new Promise((resolve, reject) => {
                 executeRemote(opcode, data, resolve, reject);
@@ -144,23 +288,27 @@
         }
         
         var chunkcache = new Cache(8192); // Kept in sync with server, hopefully.
-        async function updateDisplay() {
-            var data = await executePromise(0, null);
-            
+        var canvas = document.getElementById('display');
+        var canvas_context = canvas.getContext('2d');    
+        var canvas_vis = document.getElementById('display-visible');
+        var canvas_vis_context = canvas_vis.getContext('2d');
+        async function updateDisplay(data) {
             var header = struct('<?HHI').unpack(data.slice(0, 9));
             
-            if (header[0] == true) {
-                var canvas = document.getElementById('display');
-                var canvas_context = canvas.getContext('2d');                    
-
+            if (header[0] == true) {               
                 if (canvas.width != header[1] || canvas.height != header[2]) {
                     canvas.width = String(header[1]);
                     canvas.height = String(header[2]);
                     
+                    canvas_vis.width = canvas.width;
+                    canvas_vis.height = canvas.height;
+                    
                     await resetMouse();
                 }
                 
-                var chunks = pako.inflate(data.slice(9, 9 + header[3])).buffer;
+                // var chunks = pako.inflate(data.slice(9, 9 + header[3])).buffer;
+                
+                var chunks = data.slice(9, 9 + header[3]);
                 
                 var position = 0;
                 while (position < chunks.byteLength) {
@@ -171,7 +319,7 @@
                     if (chunkh[1] == false) {
                         var chunkd = chunks.slice(position, position + chunkh[0]);
                         
-                        var framebuffer = new Blob([chunkd]);
+                        var framebuffer = new Blob([chunkd], { type: 'image/*' });
                         var image = await imagePromise(URL.createObjectURL(framebuffer));
                         canvas_context.drawImage(image, chunkh[3], chunkh[4]);
                         
@@ -186,58 +334,50 @@
                         }
                     }
                 }
-                
-                var canvas_vis = document.getElementById('display-visible');
-                var canvas_context_vis = canvas_vis.getContext('2d');    
-                
-                canvas_vis.width = canvas.width
-                canvas_vis.height = canvas.height
-                
-                canvas_context_vis.drawImage(canvas, 0, 0);
+                canvas_vis_context.drawImage(canvas, 0, 0);
             }
             
             return header[0];
         }
         
         async function moveMouse(x, y) {
-            await executePromise(2, struct('<II').pack(x, y));
+            await executePromise(2, struct('<HH').pack(x, y));
         }
         
         async function displaySize() {
-            return struct('<II').unpack(await executePromise(3, null));
+            return struct('<HH').unpack(await executePromise(3, null));
         }
         
         async function resetMouse() {
-            await moveMouse(vcanvas.width, vcanvas.height);
+            await moveMouse(32767, 32767);
         }
         
-        var xmpos = 0;
-        var ympos = 0;
+        var xmpos = 32767;
+        var ympos = 32767;
         var last_update = 0;
         async function updateMousePosition(e) {
             xmpos += e.movementX;
             ympos += e.movementY;
-            
-            if (xmpos < 0) {
-                xmpos = 0;
-            }
-            
-            if (ympos < 0) {
-                ympos = 0;
-            }
-
-            
-            if (xmpos > (vcanvas.width * 2)) {
-                xmpos = (vcanvas.width * 2);
-            }
-            
-            if (ympos > (vcanvas.height * 2)) {
-                ympos = (vcanvas.height * 2);
-            }
                     
             var current_time = new Date().getTime();
-            if ((current_time - last_update) > 16) {
+            if ((current_time - last_update) > 24) {
                 last_update = current_time;
+                
+                if (xmpos < 0) {
+                    xmpos = 0;
+                }
+                
+                if (ympos < 0) {
+                    ympos = 0;
+                }
+
+                if (xmpos > 65535) {
+                    xmpos = 65535;
+                }
+                
+                if (ympos > 65535) {
+                    ympos = 65535;
+                }
                 
                 await moveMouse(xmpos, ympos);
             }
@@ -252,27 +392,57 @@
         }
         
         async function updateKeyboardDown(e) {
-            await executePromise(6, struct('<I').pack(e.keyCode));
+            await executePromise(6, str2ab(decodeKey(e.which || e.keyCode, true)));
         }
         
         async function updateKeyboardUp(e) {
-            await executePromise(7, struct('<I').pack(e.keyCode));
+            await executePromise(7, str2ab(decodeKey(e.which || e.keyCode)));
+        }
+        
+        async function cleanupKeys() {
+            await executePromise(9, null);
+        }
+        
+        function sleepPromise(ms) {
+          return new Promise(resolve => setTimeout(resolve, ms));
+        }
+        
+        async function playbackFrames(buffer, delay) {
+            var position = 0;
+            while (position < buffer.byteLength) {
+                var header = struct('<fBBI').unpack(buffer.slice(position, position + 10));
+                
+                position += 10;
+                
+                var frame = buffer.slice(position, position + header[3]);
+                var startt = new Date().getTime();
+                await updateDisplay(frame);
+                var endt = new Date().getTime();
+                var towait = (delay * 1000) - (endt - startt);
+                if (towait < 0) {
+                    towait = 0;
+                }
+                
+                await sleepPromise(towait);
+                
+                position += header[3];
+            }
+        }
+        
+        async function getBufferedFrames(delay = 0.016, tobuffer = 1) {
+            // Don't await playbackFrames!
+            playbackFrames(await executePromise(10, struct('<fB').pack(delay, tobuffer)), delay);
         }
         
         var changed = true;
         async function updateLoop() {
-            if (!document.hidden) {
-                changed = await updateDisplay();
+            while (true) {
+                if (!document.hidden) {
+                    await getBufferedFrames();
+                } else {
+                    await sleepPromise(250);
+                }
             }
-            
-            var delay;
-            if (changed) {
-                delay = 16;
-            } else {
-                delay = 32;
-            }
-            
-            setTimeout(async function() {await updateLoop();}, delay);
         }
         
         ws.onopen = async function(e) {
