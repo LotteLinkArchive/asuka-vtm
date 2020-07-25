@@ -204,6 +204,7 @@
         
         var INTERACT_URL = pwsurl('/../../operate/{{ "{0}/{1}/{2}".format(seed, hashlib.sha512("{0} {1}".format(session.logged_in.hex(), seed).encode()).hexdigest(), vuuid) }}');
         var ws = new WebSocket(INTERACT_URL);
+        var wsdisp = new WebSocket(INTERACT_URL);
         
         // TEST FUNCTION, REMOVE THIS
         // executeRemote(0, await new Response(new Blob([0, 0])).arrayBuffer(), function(data) { console.log(data); })
@@ -239,7 +240,7 @@
             console.error(details[0] + " WEBSOCKET: " + details[1]);
         }
         
-        function executeRemote(opcode, data, callback, onerror) {
+        function executeRemote(opcode, data, callback, onerror, socket = ws) {
             // Handle remote communication with the Asuka server (interacting with the VM in realtime)
             
             if (typeof(onerror) === 'undefined') {
@@ -249,7 +250,7 @@
             var EventID = Math.floor(Math.random() * 4294967296);
             var Message = concatArrayBuffers(struct('<BI').pack(opcode, EventID), data);
             
-            ws.addEventListener('message', async function(event) {
+            socket.addEventListener('message', async function(event) {
                 var response = await new Response(event.data).arrayBuffer()
                 var header = struct('<BI').unpack(response.slice(0, 5));
                 var data = response.slice(6);
@@ -266,7 +267,7 @@
                 }
             }, false);
             
-            ws.send(new Blob([Message]));
+            socket.send(new Blob([Message]));
         }
         
         function imagePromise(src) {
@@ -284,9 +285,9 @@
             })
         }
         
-        function executePromise(opcode, data) {
+        function executePromise(opcode, data, socket = ws) {
             return new Promise((resolve, reject) => {
-                executeRemote(opcode, data, resolve, reject);
+                executeRemote(opcode, data, resolve, reject, socket);
             })
         }
         
@@ -363,23 +364,23 @@
             ympos += e.movementY;
                     
             var current_time = new Date().getTime();
-            if ((current_time - last_update) > 24) {
+            if ((current_time - last_update) > 32) {
                 last_update = current_time;
                 
                 if (xmpos < 0) {
-                    xmpos = 0;
+                    xmpos = 32767;
                 }
                 
                 if (ympos < 0) {
-                    ympos = 0;
+                    ympos = 32767;
                 }
 
                 if (xmpos > 65535) {
-                    xmpos = 65535;
+                    xmpos = 32767;
                 }
                 
                 if (ympos > 65535) {
-                    ympos = 65535;
+                    ympos = 32767;
                 }
                 
                 await moveMouse(xmpos, ympos);
@@ -413,15 +414,15 @@
         async function playbackFrames(buffer, delay) {
             var position = 0;
             while (position < buffer.byteLength) {
+                var startt = new Date().getTime();
                 var header = struct('<fBBI').unpack(buffer.slice(position, position + 10));
                 
                 position += 10;
                 
                 var frame = buffer.slice(position, position + header[3]);
-                var startt = new Date().getTime();
                 await updateDisplay(frame);
                 var endt = new Date().getTime();
-                var towait = (delay * 1000) - (endt - startt);
+                var towait = (header[0] * 1000) - (endt - startt);
                 if (towait < 0) {
                     towait = 0;
                 }
@@ -432,15 +433,15 @@
             }
         }
         
-        async function getBufferedFrames(delay = 0.016, tobuffer = 1) {
+        async function getBufferedFrames(delay = 0.032, tobuffer = 4) {
             // Don't await playbackFrames!
-            playbackFrames(await executePromise(10, struct('<fB').pack(delay, tobuffer)), delay);
+            playbackFrames(await executePromise(10, struct('<fB').pack(delay, tobuffer), socket = wsdisp), delay);
         }
         
         var changed = true;
         async function updateLoop() {
             while (true) {
-                if (!document.hidden) {
+                if (!document.hidden && wsdisp.readyState == 1) {
                     await getBufferedFrames();
                 } else {
                     await sleepPromise(250);

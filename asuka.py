@@ -36,7 +36,7 @@ import numpy as np
 
 from quart import (
     Quart, websocket, render_template, url_for, session, request,
-    redirect, abort, Response, make_response
+    redirect, abort, Response, make_response, app as gapp
 )
 from pony.orm import *
 app = Quart(__name__)
@@ -524,7 +524,7 @@ async def operate(username, password, vuuid):
         vmi = vb().get(vmo.id)
         
     # Define command functions
-    async def get_display(world):
+    def get_display(world):
         display = world['context']['vm'].display
         
         # Capture the display on each call
@@ -566,6 +566,7 @@ async def operate(username, password, vuuid):
 
                 if temp_c != fb_c:
                     if ALPHA_CHECK == True:
+                        """
                         downscale = (lambda i: i.resize(
                             size = (i.width // 4, i.height // 4),
                             resample = Image.BILINEAR
@@ -573,19 +574,24 @@ async def operate(username, password, vuuid):
                         
                         xsplit = downscale(fb_c).split()
                         ysplit = downscale(temp_c).split()
+                        """
                         
-                        #xsplit = fb_c.split()
-                        #ysplit = temp_c.split()
+                        xsplit = fb_c.split()
+                        ysplit = temp_c.split()
                         mask = ImageOps.invert(ImageMath.eval(
                             '((abs(b - a) + abs(d - c) + abs(f - e)) * 127)',
                             a = xsplit[0], b = ysplit[0],
                             c = xsplit[1], d = ysplit[1],
                             e = xsplit[2], f = ysplit[2]
                         ).convert('L')).convert(
-                            '1', dither = Image.NONE).resize(
+                            '1', dither = Image.NONE)
+                            
+                        """
+                        mask = mask.resize(
                                 size = temp_c.size,
                                 resample = Image.NEAREST
                         )
+                        """
 
                         final = Image.composite(
                             Image.new('RGBA', temp_c.size), temp_c, mask)
@@ -667,7 +673,7 @@ async def operate(username, password, vuuid):
                         elif TYPE_PICK_MODE == 'jpegonly':
                             data = io.BytesIO()
                             final.convert('RGB').save(
-                                data, 'JPEG', quality = 25
+                                data, 'JPEG', quality = 80
                             )
                             data.seek(0)
                             data = data.read()
@@ -781,7 +787,8 @@ async def operate(username, password, vuuid):
         frames = []
         for cframe in range(tobuffer):
             start_time = time.time()
-            frame = await get_display(world)
+            
+            frame = await gapp.run_sync(get_display)(world)
             await asyncio.sleep(nonneg(framewait - (time.time() - start_time)))
             total_time = time.time() - start_time
             
