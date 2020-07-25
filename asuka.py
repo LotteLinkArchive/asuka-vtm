@@ -566,7 +566,6 @@ async def operate(username, password, vuuid):
 
                 if temp_c != fb_c:
                     if ALPHA_CHECK == True:
-                        """
                         downscale = (lambda i: i.resize(
                             size = (i.width // 4, i.height // 4),
                             resample = Image.BILINEAR
@@ -574,10 +573,9 @@ async def operate(username, password, vuuid):
                         
                         xsplit = downscale(fb_c).split()
                         ysplit = downscale(temp_c).split()
-                        """
                         
-                        xsplit = fb_c.split()
-                        ysplit = temp_c.split()
+                        #xsplit = fb_c.split()
+                        #ysplit = temp_c.split()
                         mask = ImageOps.invert(ImageMath.eval(
                             '((abs(b - a) + abs(d - c) + abs(f - e)) * 127)',
                             a = xsplit[0], b = ysplit[0],
@@ -586,12 +584,10 @@ async def operate(username, password, vuuid):
                         ).convert('L')).convert(
                             '1', dither = Image.NONE)
                             
-                        """
                         mask = mask.resize(
                                 size = temp_c.size,
                                 resample = Image.NEAREST
                         )
-                        """
 
                         final = Image.composite(
                             Image.new('RGBA', temp_c.size), temp_c, mask)
